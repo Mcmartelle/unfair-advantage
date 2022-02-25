@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use bevy::window::WindowMode;
-use template_lib::*;
+use unfair_advantage_lib::*;
 
 fn main() {
     App::new()

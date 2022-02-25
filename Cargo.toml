@@ -1,10 +1,10 @@
 [package]
-name = "template"
-description = "A Bevy + mdbook enabled template repo to build on."
+name = "unfair-advantage"
+description = "A Bevy Game Jam #1 game!"
 version = "0.0.0"
-authors = ["Leafwing Studios"]
-homepage = "https://leafwing-studios.com"
-repository = "https://github.com/leafwing-studios/template-repo"
+authors = ["Matthew Martelle"]
+homepage = "https://mcmartelle.github.io/"
+repository = "https://github.com/Mcmartelle/unfair-advantage"
 license = "MIT OR Apache-2.0"
 edition = "2021"
 categories = ["games", "game-development"]
@@ -19,6 +19,7 @@ opt-level = 3
 members = ["./", "tools/ci"]
 
 [dependencies]
+# bevy = { version = "0.6", default-features = false}
 bevy = { version = "0.6", default-features = false, features = ["dynamic"]}
 
 [patch.crates-io]
@@ -34,11 +35,11 @@ bevy = { version = "0.6", default-features = false}
 
 
 [lib]
-name = "template_lib"
+name = "unfair_advantage_lib"
 path = "src/lib.rs"
 
 [[bin]]
-name = "template_bin"
+name = "unfair_advantage_bin"
 path = "src/main.rs"
 
 [[bench]]
