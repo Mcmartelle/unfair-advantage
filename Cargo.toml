@@ -20,7 +20,8 @@ members = ["./", "tools/ci"]
 
 [dependencies]
 # bevy = { version = "0.6", default-features = false}
-bevy = { version = "0.6", default-features = false, features = ["dynamic"]}
+bevy = { version = "0.6", default-features = true, features = ["dynamic"]}
+bevy_rapier2d = { version = "0.12.1", features = [ "simd-nightly", "parallel"] }
 
 [patch.crates-io]
 # We can override the bevy version with remote or local versions
