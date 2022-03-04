@@ -44,16 +44,17 @@ impl Plugin for UnfairAdvantagePlugin {
         )
         .add_system_set(
             SystemSet::on_update(AppState::InOnePlayerGame)
-                .with_system(slayer_controls)
-                .with_system(slayer_animator)
-                .with_system(
-                    snake_movement_input
-                        .label(SnakeAction::Input)
-                        .before(SnakeAction::Movement),
-                )
-                .with_system(game_over.after(SnakeAction::Movement))
-                .with_system(snake_movement.label(SnakeAction::Movement))
-                .with_system(position_translation)
+            .with_system(slayer_controls)
+            .with_system(slayer_animator)
+            .with_system(
+                snake_movement_input
+                .label(SnakeAction::Input)
+                .before(SnakeAction::Movement),
+            )
+            .with_system(game_over.after(SnakeAction::Movement))
+            .with_system(snake_movement.label(SnakeAction::Movement))
+            .with_system(position_translation)
+            .with_system(slayer_death)
                 // .with_system(size_scaling)
         )
         .add_system_set(SystemSet::on_exit(AppState::InOnePlayerGame).with_system(cleanup_game))
@@ -370,8 +371,8 @@ fn setup_one_player_game(
 ) {
     commands.spawn_bundle(OrthographicCameraBundle::new_2d());
     audio.play_looped(asset_server.load("music/game_theme.ogg"));
-    let slayer_texture_handle = asset_server.load("slayer_idle.png");
-    let slayer_texture_atlas = TextureAtlas::from_grid(slayer_texture_handle, Vec2::new(64.0, 64.0), 6, 1);
+    let slayer_texture_handle = asset_server.load("slayer_run.png");
+    let slayer_texture_atlas = TextureAtlas::from_grid(slayer_texture_handle, Vec2::new(64.0, 64.0), 8, 1);
     let slayer_texture_atlas_handle = texture_atlases.add(slayer_texture_atlas);
 
     commands.spawn_bundle(SpriteBundle {
@@ -396,7 +397,7 @@ fn setup_one_player_game(
         transform: Transform::from_translation(Vec3::new(0.0, 0.0, 1.0)),
         ..Default::default()
     })
-    .insert(AnimationTimer(Timer::from_seconds(0.1, true)))
+    .insert(AnimationTimer(Timer::from_seconds(0.04, true)))
     .insert(AttackCooldown(Timer::from_seconds(0.6, false)))
     .insert(Facing::Right)
     .insert(SwordDirection::NotAttacking)
@@ -407,7 +408,9 @@ fn setup_one_player_game(
         half_extends: slayer_size.extend(0.0) / 2.0,
         border_radius: None,
     })
+    .insert(RotationConstraints::lock())
     .insert(Velocity::default())
+    .insert(CollisionLayers::new(Layer::Slayer, Layer::SnakeHead))
     .insert(Slayer);
 }
 
@@ -424,8 +427,10 @@ fn setup_two_player_game(
 
 fn cleanup_game(
     mut commands: Commands,
-    entities: Query<Entity, Without<Camera>>
+    entities: Query<Entity, Without<Camera>>,
+    audio: Res<Audio>
 ) {
+    audio.stop();
     for entity in entities.iter() {
         commands.entity(entity).despawn_recursive();
     }
@@ -527,6 +532,41 @@ fn slayer_animator(
             sprite.index = (sprite.index + 1) % texture_atlas.textures.len();
         }
     }
+}
+
+fn slayer_death (
+    mut commands: Commands,
+    mut events: EventReader<CollisionEvent>,
+    asset_server: Res<AssetServer>,
+    audio: Res<Audio>,
+) {
+    events
+        .iter()
+        .filter(|e| e.is_started())
+        .filter_map(|event| {
+            let (entity_1, entity_2) = event.rigid_body_entities();
+            let (layers_1, layers_2) = event.collision_layers();
+            if is_slayer(layers_1) && is_snake_head(layers_2) {
+                Some(entity_1)
+            } else if is_slayer(layers_2) && is_snake_head(layers_1) {
+                Some(entity_2)
+            } else {
+                None
+            }
+        })
+        .for_each(|slayer_entity| {
+            // audio.play(asset_server.load("sfx/slayer_death.ogg"));
+            audio.play(asset_server.load("sfx/snake_chomp.ogg"));
+            commands.entity(slayer_entity).despawn()
+        });
+}
+
+fn is_slayer(layers: CollisionLayers) -> bool {
+    layers.contains_group(Layer::Slayer) && !layers.contains_group(Layer::SnakeHead)
+}
+
+fn is_snake_head(layers: CollisionLayers) -> bool {
+    !layers.contains_group(Layer::Slayer) && layers.contains_group(Layer::SnakeHead)
 }
 
 const SNAKE_HEAD_COLOR: Color = Color::rgb(0.7, 0.7, 0.7);
@@ -661,6 +701,12 @@ impl Direction {
     }
 }
 
+#[derive(PhysicsLayer)]
+enum Layer {
+    Slayer,
+    SnakeHead,
+}
+
 fn spawn_snake(
     mut commands: Commands,
     mut segments: ResMut<SnakeSegments>,
@@ -677,11 +723,12 @@ fn spawn_snake(
                 direction: Direction::Right,
             })
             .insert(Position { x: 8, y: 9 })
-
+            .insert(RigidBody::KinematicPositionBased)
             .insert(CollisionShape::Cuboid {
                 half_extends: snake_sprite_size.extend(0.0) / 2.0,
                 border_radius: None,
             })
+            .insert(CollisionLayers::new(Layer::SnakeHead, Layer::Slayer))
             .id(),
         commands
             .spawn_bundle(SpriteBundle {
@@ -696,6 +743,11 @@ fn spawn_snake(
                 direction: Direction::Right,
             })
             .insert(Position { x: 7, y: 9 })
+            .insert(RigidBody::KinematicPositionBased)
+            .insert(CollisionShape::Cuboid {
+                half_extends: snake_sprite_size.extend(0.0) / 2.0,
+                border_radius: None,
+            })
             .id(),
         commands
             .spawn_bundle(SpriteBundle {
@@ -706,6 +758,11 @@ fn spawn_snake(
                 direction: Direction::Right,
             })
             .insert(Position { x: 6, y: 9 })
+            .insert(RigidBody::KinematicPositionBased)
+            .insert(CollisionShape::Cuboid {
+                half_extends: snake_sprite_size.extend(0.0) / 2.0,
+                border_radius: None,
+            })
             .id(),
         commands
             .spawn_bundle(SpriteBundle {
@@ -716,6 +773,11 @@ fn spawn_snake(
                 direction: Direction::Right,
             })
             .insert(Position { x: 5, y: 9 })
+            .insert(RigidBody::KinematicPositionBased)
+            .insert(CollisionShape::Cuboid {
+                half_extends: snake_sprite_size.extend(0.0) / 2.0,
+                border_radius: None,
+            })
             .id(),
         commands
             .spawn_bundle(SpriteBundle {
@@ -726,6 +788,11 @@ fn spawn_snake(
                 direction: Direction::Right,
             })
             .insert(Position { x: 4, y: 9 })
+            .insert(RigidBody::KinematicPositionBased)
+            .insert(CollisionShape::Cuboid {
+                half_extends: snake_sprite_size.extend(0.0) / 2.0,
+                border_radius: None,
+            })
             .id(),
         commands
             .spawn_bundle(SpriteBundle {
@@ -736,6 +803,11 @@ fn spawn_snake(
                 direction: Direction::Right,
             })
             .insert(Position { x: 3, y: 9 })
+            .insert(RigidBody::KinematicPositionBased)
+            .insert(CollisionShape::Cuboid {
+                half_extends: snake_sprite_size.extend(0.0) / 2.0,
+                border_radius: None,
+            })
             .id(),
         commands
             .spawn_bundle(SpriteBundle {
@@ -746,6 +818,11 @@ fn spawn_snake(
                 direction: Direction::Right,
             })
             .insert(Position { x: 2, y: 9 })
+            .insert(RigidBody::KinematicPositionBased)
+            .insert(CollisionShape::Cuboid {
+                half_extends: snake_sprite_size.extend(0.0) / 2.0,
+                border_radius: None,
+            })
             .id(),
         commands
             .spawn_bundle(SpriteBundle {
@@ -756,6 +833,11 @@ fn spawn_snake(
                 direction: Direction::Right,
             })
             .insert(Position { x: 2, y: 8 })
+            .insert(RigidBody::KinematicPositionBased)
+            .insert(CollisionShape::Cuboid {
+                half_extends: snake_sprite_size.extend(0.0) / 2.0,
+                border_radius: None,
+            })
             .id(),
     ];
 }
