@@ -7,9 +7,8 @@
 use bevy::app::AppExit;
 use bevy::core::Time;
 use bevy::prelude::*;
-use nalgebra::Isometry2;
-use bevy_rapier2d::prelude::*;
-use bevy_rapier2d::rapier::na::Vector2;
+use heron::prelude::*;
+use bevy_kira_audio::{Audio, AudioPlugin};
 
 pub mod utils;
 
@@ -55,17 +54,19 @@ impl Plugin for UnfairAdvantagePlugin {
                 .with_system(game_over.after(SnakeAction::Movement))
                 .with_system(snake_movement.label(SnakeAction::Movement))
                 .with_system(position_translation)
-                .with_system(size_scaling)
+                // .with_system(size_scaling)
         )
         .add_system_set(SystemSet::on_exit(AppState::InOnePlayerGame).with_system(cleanup_game))
         .add_system_set(SystemSet::on_enter(AppState::InTwoPlayerGame).with_system(setup_two_player_game))
         .add_system_set(
             SystemSet::on_update(AppState::InTwoPlayerGame)
-            .with_system(slayer_controls)
+            // .with_system(slayer_controls)
             .with_system(slayer_animator)
         )
         .add_system_set(SystemSet::on_exit(AppState::InTwoPlayerGame).with_system(cleanup_game))
-        .add_plugin(RapierPhysicsPlugin::<NoUserData>::default());
+        .add_plugin(PhysicsPlugin::default())
+        .add_plugin(AudioPlugin)
+        .insert_resource(Gravity::from(Vec3::new(0.0, -300.0, 0.0)));
     }
 }
 
@@ -99,8 +100,9 @@ const NORMAL_BUTTON: Color = Color::rgb(0.15, 0.15, 0.15);
 const HOVERED_BUTTON: Color = Color::rgb(0.25, 0.25, 0.25);
 const PRESSED_BUTTON: Color = Color::rgb(0.35, 0.75, 0.35);
 
-fn setup_main_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
+fn setup_main_menu(mut commands: Commands, asset_server: Res<AssetServer>, audio: Res<Audio>) {
     // ui camera
+    audio.play_looped(asset_server.load("music/main_menu_theme.ogg"));
     commands.spawn_bundle(UiCameraBundle::default()).insert(OnMainMenuScreen);
     commands
         .spawn_bundle(NodeBundle {
@@ -238,7 +240,9 @@ fn menu_button_dynamic_colors(
 fn cleanup_main_menu(
     mut commands: Commands,
     to_despawn: Query<Entity, With<OnMainMenuScreen>>,
+    audio: Res<Audio>
 ) {
+    audio.stop();
     for entity in to_despawn.iter() {
         commands.entity(entity).despawn_recursive();
     }
@@ -362,43 +366,48 @@ fn setup_one_player_game(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut texture_atlases: ResMut<Assets<TextureAtlas>>,
-    mut rapier_config: ResMut<RapierConfiguration>
+    audio: Res<Audio>
 ) {
+    commands.spawn_bundle(OrthographicCameraBundle::new_2d());
+    audio.play_looped(asset_server.load("music/game_theme.ogg"));
     let slayer_texture_handle = asset_server.load("slayer_idle.png");
     let slayer_texture_atlas = TextureAtlas::from_grid(slayer_texture_handle, Vec2::new(64.0, 64.0), 6, 1);
     let slayer_texture_atlas_handle = texture_atlases.add(slayer_texture_atlas);
 
-    // rapier_config.gravity = Vector2::new(0.0, -10.0);
-    let sprite_size_x = 64.0;
-    let sprite_size_y = 64.0;
-    rapier_config.scale = 32.0;
-    let collider_size_x = sprite_size_x / rapier_config.scale;
-    let collider_size_y = sprite_size_y / rapier_config.scale;
-
-    let collider = ColliderBundle {
-        shape: ColliderShape::cuboid(100.0, 0.1).into(), // the ground
-        position: Isometry2::new(Vector2::new(0.0, -15.0).into(), 0.0).into(),
+    commands.spawn_bundle(SpriteBundle {
+        texture: asset_server.load("snake_den.png"),
         ..Default::default()
-    };
-    commands.spawn_bundle(collider);
+    });
 
-    commands.spawn_bundle(OrthographicCameraBundle::new_2d());
+    // The Ground
+    commands.spawn_bundle((
+        Transform::from_translation(Vec3::new(0.0, -500.0, 0.0)),
+        GlobalTransform::default(),
+        RigidBody::Static,
+        CollisionShape::Cuboid {
+            half_extends: Vec2::new(1500.0, 50.0).extend(0.0) / 2.0,
+            border_radius: None,
+        },
+    ));
+
+    let slayer_size = Vec2::new(64.0, 64.0);
     commands.spawn_bundle(SpriteSheetBundle {
         texture_atlas: slayer_texture_atlas_handle,
+        transform: Transform::from_translation(Vec3::new(0.0, 0.0, 1.0)),
         ..Default::default()
     })
-    .insert_bundle(RigidBodyBundle{
-        mass_properties: RigidBodyMassPropsFlags::ROTATION_LOCKED.into(),
-        body_type: RigidBodyType::Dynamic.into(),
-        ..Default::default()
-    })
-    .insert_bundle(ColliderBundle {
-        position: [collider_size_x / 2.0, collider_size_y / 2.0].into(),
-        mass_properties: ColliderMassProps::Density(2.0).into(),
-        ..Default::default()
-    })
-    .insert(ColliderPositionSync::Discrete)
     .insert(AnimationTimer(Timer::from_seconds(0.1, true)))
+    .insert(AttackCooldown(Timer::from_seconds(0.6, false)))
+    .insert(Facing::Right)
+    .insert(SwordDirection::NotAttacking)
+    .insert(FeetState::InAir)
+    .insert(SlayerAnim::Jump)
+    .insert(RigidBody::Dynamic)
+    .insert(CollisionShape::Cuboid {
+        half_extends: slayer_size.extend(0.0) / 2.0,
+        border_radius: None,
+    })
+    .insert(Velocity::default())
     .insert(Slayer);
 }
 
@@ -424,39 +433,83 @@ fn cleanup_game(
 
 const SPEED: f32 = 300.0;
 fn slayer_controls(
+    mut commands: Commands,
     mut state: ResMut<State<AppState>>,
     input: Res<Input<KeyCode>>,
-    rapier_parameters: ResMut<RapierConfiguration>,
-    mut slayer_info: Query<&mut RigidBodyVelocityComponent, With<Slayer>>,
+    mut slayer_info: Query<
+        (Entity,
+        &mut Velocity,
+        &Facing,
+        &AttackCooldown),
+        With<Slayer>
+    >,
 ) {
-    for mut rb_vels in slayer_info.iter_mut() {
-        let mut direction = Vector2::zeros();
-        if input.pressed(KeyCode::A) {
-            direction.x -= 1.0;
-        }
-        if input.pressed(KeyCode::D) {
-            direction.x += 1.0;
-        }
-        if input.pressed(KeyCode::W) {
-            direction.y += 1.0;
-        }
-        if input.pressed(KeyCode::S) {
-            direction.y -= 1.0;
+    for (entity, mut velocity, facing, attack_cooldown) in slayer_info.iter_mut() {
+        let x = if input.pressed(KeyCode::A) {
+            -1.0
+        } else if input.pressed(KeyCode::D) {
+            1.0
+        } else {
+            0.0
+        };
+    
+        let y = if input.pressed(KeyCode::S) {
+            -1.0
+        } else if input.pressed(KeyCode::W) {
+            1.0
+        } else {
+            0.0
+        };
+
+        if input.just_pressed(KeyCode::B) && attack_cooldown.0.finished() { // Attack button
+            if x > 0.0 {
+                commands.entity(entity).insert(SwordDirection::Right);
+            } else if x < 0.0 {
+                commands.entity(entity).insert(SwordDirection::Left);
+            } else if y > 0.0 {
+                commands.entity(entity).insert(SwordDirection::Up);
+            } else if y < 0.0 {
+                commands.entity(entity).insert(SwordDirection::Down);
+            } else {
+                let _sword_direction = match facing {
+                    Facing::Left => SwordDirection::Left,
+                    Facing::Right => SwordDirection::Right,
+                };
+                commands.entity(entity).insert(_sword_direction);
+            }
+        } else if attack_cooldown.0.finished() {
+            commands.entity(entity).insert(SwordDirection::NotAttacking);
         }
         if input.pressed(KeyCode::P) || input.pressed(KeyCode::Escape) {
             state.push(AppState::PauseMenu).unwrap();
         }
 
-        if direction != Vector2::zeros() {
-            direction /= direction.magnitude() * rapier_parameters.scale;
-            rb_vels.linvel = direction * SPEED;
-        }
+        let target_velocity = Vec2::new(x, y).normalize_or_zero() * SPEED;
 
+        if target_velocity != Vec2::ZERO {
+            velocity.linear = target_velocity.extend(0.0);
+        }
     }
 }
 
 #[derive(Component)]
 struct AnimationTimer(Timer);
+
+#[derive(Component)]
+struct AttackCooldown(Timer);
+
+// fn slayer_anim_selector(
+//     commands: Commands,
+//     texture_atlases: Res<Assets<TextureAtlas>>,
+//     mut query: Query<(
+//         Entity,
+//         &Facing,
+//         &FeetState,
+//         &mut SlayerAnim,
+//     )>
+// ) {
+
+// }
 
 fn slayer_animator(
     time: Res<Time>,
@@ -477,8 +530,8 @@ fn slayer_animator(
 }
 
 const SNAKE_HEAD_COLOR: Color = Color::rgb(0.7, 0.7, 0.7);
-const FOOD_COLOR: Color = Color::rgb(1.0, 0.0, 1.0);
 const SNAKE_SEGMENT_COLOR: Color = Color::rgb(0.3, 0.3, 0.3);
+const GROUND_COLOR: Color = Color::rgb(0.3, 0.8, 0.3);
 
 const ARENA_HEIGHT: u32 = 14;
 const ARENA_WIDTH: u32 = 28;
@@ -516,6 +569,11 @@ struct SnakeHead {
     direction: Direction,
 }
 
+#[derive(Component)]
+struct SnakeSegment {
+    direction: Direction,
+}
+
 struct SnakeDeathEvent;
 struct SlayerDeathEvent;
 struct SnakeSplitEvent;
@@ -524,9 +582,6 @@ struct GameOverEvent;
 #[derive(Default)]
 struct LastTailPosition(Option<Position>);
 
-#[derive(Component)]
-struct SnakeSegment;
-
 #[derive(Default)]
 struct SnakeSegments(Vec<Entity>);
 
@@ -534,7 +589,7 @@ struct SnakeTimer(Timer);
 
 impl SnakeTimer {
     pub fn new() -> Self {
-        Self (Timer::from_seconds(0.15, true))
+        Self (Timer::from_seconds(0.4, true))
     }
 }
 
@@ -543,15 +598,46 @@ impl Default for SnakeTimer {
         Self::new()
     }
 }
-// #[derive(Default)]
-// struct Game {
-//     snakes: Vec<Vec<Entity>>,
-//     snake_movement_timer: Timer,
-// };
+
+#[derive(Component)]
+enum Facing {
+    Left,
+    Right,
+}
+
+#[derive(Component)]
+enum SwordDirection {
+    Up,
+    Down,
+    Left,
+    Right,
+    NotAttacking,
+}
 
 
 
+#[derive(Component)]
+enum FeetState {
+    OnGround,
+    InAir,
+}
 
+#[derive(Component)]
+enum SlayerAnim {
+    Idle,
+    Run,
+    Jump,
+    AttackForward,
+    AttackDown,
+    AttackUp,
+}
+
+#[derive(Default)]
+struct Game {
+    snakes: Vec<Vec<Entity>>,
+    snake_movement_timer: Timer,
+    lives: u8,
+}
 
 #[derive(Component)]
 struct Food;
@@ -575,42 +661,114 @@ impl Direction {
     }
 }
 
-fn spawn_snake(mut commands: Commands, mut segments: ResMut<SnakeSegments>) {
+fn spawn_snake(
+    mut commands: Commands,
+    mut segments: ResMut<SnakeSegments>,
+    asset_server: Res<AssetServer>
+) {
+    let snake_sprite_size = Vec2::new(64.0, 64.0);
     segments.0 = vec![
         commands
             .spawn_bundle(SpriteBundle {
-                sprite: Sprite {
-                    color: SNAKE_HEAD_COLOR,
-                    ..Default::default()
-                },
+                texture: asset_server.load("snake_head.png"),
                 ..Default::default()
             })
             .insert(SnakeHead {
                 direction: Direction::Right,
             })
-            .insert(SnakeSegment)
             .insert(Position { x: 8, y: 9 })
-            .insert(SnakeSize::square(0.8))
+
+            .insert(CollisionShape::Cuboid {
+                half_extends: snake_sprite_size.extend(0.0) / 2.0,
+                border_radius: None,
+            })
             .id(),
-        spawn_segment(commands, Position { x: 7, y: 9 }),
+        commands
+            .spawn_bundle(SpriteBundle {
+                sprite: Sprite {
+                    flip_x: true,
+                    ..Default::default()
+                },
+                texture: asset_server.load("snake_section.png"),
+                ..Default::default()
+            })
+            .insert(SnakeSegment {
+                direction: Direction::Right,
+            })
+            .insert(Position { x: 7, y: 9 })
+            .id(),
+        commands
+            .spawn_bundle(SpriteBundle {
+                texture: asset_server.load("snake_section.png"),
+                ..Default::default()
+            })
+            .insert(SnakeSegment {
+                direction: Direction::Right,
+            })
+            .insert(Position { x: 6, y: 9 })
+            .id(),
+        commands
+            .spawn_bundle(SpriteBundle {
+                texture: asset_server.load("snake_section.png"),
+                ..Default::default()
+            })
+            .insert(SnakeSegment {
+                direction: Direction::Right,
+            })
+            .insert(Position { x: 5, y: 9 })
+            .id(),
+        commands
+            .spawn_bundle(SpriteBundle {
+                texture: asset_server.load("snake_section.png"),
+                ..Default::default()
+            })
+            .insert(SnakeSegment {
+                direction: Direction::Right,
+            })
+            .insert(Position { x: 4, y: 9 })
+            .id(),
+        commands
+            .spawn_bundle(SpriteBundle {
+                texture: asset_server.load("snake_section.png"),
+                ..Default::default()
+            })
+            .insert(SnakeSegment {
+                direction: Direction::Right,
+            })
+            .insert(Position { x: 3, y: 9 })
+            .id(),
+        commands
+            .spawn_bundle(SpriteBundle {
+                texture: asset_server.load("snake_section.png"),
+                ..Default::default()
+            })
+            .insert(SnakeSegment {
+                direction: Direction::Right,
+            })
+            .insert(Position { x: 2, y: 9 })
+            .id(),
+        commands
+            .spawn_bundle(SpriteBundle {
+                texture: asset_server.load("snake_tail.png"),
+                ..Default::default()
+            })
+            .insert(SnakeSegment {
+                direction: Direction::Right,
+            })
+            .insert(Position { x: 2, y: 8 })
+            .id(),
     ];
 }
 
-fn spawn_segment(mut commands: Commands, position: Position) -> Entity {
-    commands
-        .spawn_bundle(SpriteBundle {
-            sprite: Sprite {
-                color: SNAKE_SEGMENT_COLOR,
-                ..Default::default()
-            },
-            ..Default::default()
-        })
-        .insert(SnakeSegment)
-        .insert(position)
-        .insert(SnakeSize::square(0.65))
-        .id()
+struct SnakeFlipFlop {
+    flip_x: bool
 }
 
+impl Default for SnakeFlipFlop {
+    fn default() -> Self {
+        Self { flip_x: true }
+    }
+}
 
 fn snake_movement(
     mut last_tail_position: ResMut<LastTailPosition>,
@@ -619,38 +777,53 @@ fn snake_movement(
     segments: ResMut<SnakeSegments>,
     mut snake_timer: ResMut<SnakeTimer>,
     time: Res<Time>,
-    mut heads: Query<(Entity, &SnakeHead)>,
+    mut heads: Query<(Entity, &SnakeHead, &mut Transform, &mut Sprite)>,
     mut positions: Query<&mut Position>,
+    mut snake_segments: Query<&mut SnakeSegment>,
+    mut snake_flip_flop: Local<SnakeFlipFlop>,
 ) {
     snake_timer.0.tick(time.delta());
     if snake_timer.0.just_finished() {
-        if let Some((head_entity, head)) = heads.iter_mut().next() {
+        if let Some((head_entity, head, mut head_transform, mut head_sprite)) = heads.iter_mut().next() {
             let segment_positions = segments
                 .0
                 .iter()
                 .map(|e| *positions.get_mut(*e).unwrap())
                 .collect::<Vec<Position>>();
+            // let segment_directions = segments
+            //     .0
+            //     .iter()
+            //     .map(|e| *snake_segments.get_mut(*e).unwrap())
+            //     .collect::<Vec<SnakeSegment>>();
             let mut head_pos = positions.get_mut(head_entity).unwrap();
             match &head.direction {
                 Direction::Left => {
                     head_pos.x -= 1;
+                    head_transform.rotation = Quat::from_rotation_z(f32::to_radians(270.0));
                 }
                 Direction::Right => {
                     head_pos.x += 1;
+                    head_transform.rotation = Quat::from_rotation_z(f32::to_radians(90.0));
                 }
                 Direction::Up => {
                     head_pos.y += 1;
+                    head_transform.rotation = Quat::from_rotation_z(f32::to_radians(180.0));
                 }
                 Direction::Down => {
                     head_pos.y -= 1;
+                    head_transform.rotation = Quat::from_rotation_z(f32::to_radians(0.0));
                 }
             };
-            if head_pos.x < 0
-                || head_pos.y < 0
-                || head_pos.x as u32 >= ARENA_WIDTH
-                || head_pos.y as u32 >= ARENA_HEIGHT
-            {
-                game_over_writer.send(GameOverEvent);
+            head_sprite.flip_x = snake_flip_flop.flip_x;
+            snake_flip_flop.flip_x = !snake_flip_flop.flip_x;
+            if head_pos.x < 0 {
+                head_pos.x = ARENA_WIDTH as i32 - 1;
+            } else if head_pos.x as u32 >= ARENA_WIDTH {
+                head_pos.x = 0;
+            } else if head_pos.y < 0 {
+                head_pos.y = ARENA_HEIGHT as i32 - 1;
+            } else if head_pos.y as u32 >= ARENA_HEIGHT {
+                head_pos.y = 0;
             }
             if segment_positions.contains(&head_pos) {
                 snake_split_writer.send(SnakeSplitEvent);
@@ -691,37 +864,39 @@ fn game_over(
     segments_res: ResMut<SnakeSegments>,
     food: Query<Entity, With<Food>>,
     segments: Query<Entity, With<SnakeSegment>>,
+    asset_server: Res<AssetServer>,
 ) {
     if reader.iter().next().is_some() {
         for ent in food.iter().chain(segments.iter()) {
             commands.entity(ent).despawn();
         }
-        spawn_snake(commands, segments_res);
+        spawn_snake(commands, segments_res, asset_server);
     }
 }
 
-fn size_scaling(windows: Res<Windows>, mut q: Query<(&SnakeSize, &mut Transform)>) {
-    let window = windows.get_primary().unwrap();
-    for (sprite_size, mut transform) in q.iter_mut() {
-        transform.scale = Vec3::new(
-            sprite_size.width / ARENA_WIDTH as f32 * window.width() as f32,
-            sprite_size.height / ARENA_HEIGHT as f32 * window.height() as f32,
-            1.0,
-        );
-    }
-}
+// fn size_scaling(windows: Res<Windows>, mut q: Query<(&SnakeSize, &mut Transform)>) {
+//     let window = windows.get_primary().unwrap();
+//     for (sprite_size, mut transform) in q.iter_mut() {
+//         transform.scale = Vec3::new(
+//             sprite_size.width / ARENA_WIDTH as f32 * window.width() as f32,
+//             sprite_size.height / ARENA_HEIGHT as f32 * window.height() as f32,
+//             1.0,
+//         );
+//     }
+// }
 
 fn position_translation(windows: Res<Windows>, mut q: Query<(&Position, &mut Transform)>) {
-    fn convert(pos: f32, bound_window: f32, bound_game: f32) -> f32 {
-        let tile_size = bound_window / bound_game;
+    fn convert(pos: f32, bound_game: f32) -> f32 {
+        let tile_size = 64.0;
+        let bound_window = tile_size * bound_game;
         pos / bound_game * bound_window - (bound_window / 2.) + (tile_size / 2.)
     }
     let window = windows.get_primary().unwrap();
     for (pos, mut transform) in q.iter_mut() {
         transform.translation = Vec3::new(
-            convert(pos.x as f32, window.width() as f32, ARENA_WIDTH as f32),
-            convert(pos.y as f32, window.height() as f32, ARENA_HEIGHT as f32),
-            0.0,
+            convert(pos.x as f32, ARENA_WIDTH as f32),
+            convert(pos.y as f32, ARENA_HEIGHT as f32),
+            2.0,
         );
     }
 }
